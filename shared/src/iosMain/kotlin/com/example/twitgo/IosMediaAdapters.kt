@@ -43,6 +43,7 @@ object IosMediaRuntime {
         adapters.playback.restore(downloadId, originalEnclosureUrl, title, positionMs)
 
     fun reportPlaybackReady(positionMs: Long) = adapters.playback.reportReady(positionMs)
+    fun reportPlaybackLoading(positionMs: Long) = adapters.playback.reportLoading(positionMs)
     fun reportPlaybackPlaying(positionMs: Long) = adapters.playback.reportPlaying(positionMs)
     fun reportPlaybackPaused(positionMs: Long) = adapters.playback.reportPaused(positionMs)
     fun reportPlaybackFailed() = adapters.playback.reportFailed()
@@ -111,6 +112,7 @@ internal class IosPlaybackController(
     }
 
     fun reportReady(positionMs: Long) = update(PlaybackPhase.READY, positionMs)
+    fun reportLoading(positionMs: Long) = update(PlaybackPhase.LOADING, positionMs)
     fun reportPlaying(positionMs: Long) = update(PlaybackPhase.PLAYING, positionMs)
     fun reportPaused(positionMs: Long) = update(PlaybackPhase.PAUSED, positionMs)
     fun reportFailed() {

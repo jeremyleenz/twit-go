@@ -26,14 +26,35 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     var backgroundCompletionHandler: (() -> Void)?
     private let player = AVPlayer()
     private let fileManager = FileManager.default
-    private var activeTasks: [String: URLSessionDownloadTask] = [:]
-    private var pausingDownloads = Set<String>()
+    private struct RepresentationValidators {
+        let eTag: String?
+        let length: Int64?
+    }
+
+    private struct ResolvedRepresentation {
+        let url: URL
+        let validators: RepresentationValidators
+    }
+
+    private struct ActiveTransfer {
+        let task: URLSessionDownloadTask
+        let validators: RepresentationValidators
+    }
+
+    private struct RetainedPartial {
+        let data: Data
+        let validators: RepresentationValidators
+    }
+
+    private var activeTransfers: [String: ActiveTransfer] = [:]
+    private var pausingTaskIdentifiers = Set<Int>()
     private var pendingResolutions: [String: UUID] = [:]
     private var currentDownloadID: String?
     private var timeObserver: Any?
     private var itemStatusObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
     private var wantsPlayback = false
+    private var nativePlaybackActive = false
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionID)
@@ -49,6 +70,8 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
         static let playbackPosition = "media.playback.position"
         static let originalPrefix = "media.download.original."
         static let pathPrefix = "media.download.path."
+        static let resumeETagPrefix = "media.download.resume.etag."
+        static let resumeLengthPrefix = "media.download.resume.length."
     }
 
     private override init() {
@@ -64,8 +87,24 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
             IosMediaRuntime.shared.reportPlaybackPlaying(positionMs: self.player.currentTime().milliseconds)
         }
         timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
-            guard let self, player.timeControlStatus == .playing, self.currentDownloadID != nil else { return }
-            IosMediaRuntime.shared.reportPlaybackPlaying(positionMs: player.currentTime().milliseconds)
+            guard let self, self.currentDownloadID != nil else { return }
+            switch player.timeControlStatus {
+            case .playing:
+                self.nativePlaybackActive = true
+                IosMediaRuntime.shared.reportPlaybackPlaying(positionMs: player.currentTime().milliseconds)
+            case .waitingToPlayAtSpecifiedRate:
+                if self.wantsPlayback {
+                    self.nativePlaybackActive = true
+                    IosMediaRuntime.shared.reportPlaybackLoading(positionMs: player.currentTime().milliseconds)
+                }
+            case .paused:
+                if self.nativePlaybackActive {
+                    self.nativePlaybackActive = false
+                    IosMediaRuntime.shared.reportPlaybackPaused(positionMs: player.currentTime().milliseconds)
+                }
+            @unknown default:
+                break
+            }
         }
         _ = session
         restorePlayback()
@@ -73,7 +112,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
             guard let self else { return }
             tasks.compactMap { $0 as? URLSessionDownloadTask }.forEach { task in
                 guard let id = task.taskDescription else { return }
-                self.activeTasks[id] = task
+                self.activeTransfers[id] = ActiveTransfer(task: task, validators: self.savedValidators(for: id))
                 IosMediaRuntime.shared.reportDownloadQueued(downloadId: id)
             }
         }
@@ -86,6 +125,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     func loadPlayback(downloadId: String, originalEnclosureUrl: String, title: String, startPositionMs: Int64) {
         currentDownloadID = downloadId
         wantsPlayback = false
+        nativePlaybackActive = false
         UserDefaults.standard.set(originalEnclosureUrl, forKey: Key.playbackURL)
         UserDefaults.standard.set(title, forKey: Key.playbackTitle)
         UserDefaults.standard.set(downloadId, forKey: Key.playbackDownloadID)
@@ -111,6 +151,8 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
                         }
                     }
                 case .failed:
+                    self.wantsPlayback = false
+                    self.nativePlaybackActive = false
                     IosMediaRuntime.shared.reportPlaybackFailed()
                 default:
                     break
@@ -134,6 +176,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
 
     func pause() {
         wantsPlayback = false
+        nativePlaybackActive = false
         player.pause()
         savePlaybackProgress()
         if player.currentItem?.status == .readyToPlay {
@@ -153,6 +196,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
 
     func stopPlayback() {
         wantsPlayback = false
+        nativePlaybackActive = false
         currentDownloadID = nil
         itemStatusObservation = nil
         player.pause()
@@ -174,20 +218,26 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
             IosMediaRuntime.shared.reportDownloadPaused(downloadId: downloadId)
             return
         }
-        guard let task = activeTasks[downloadId] else { return }
-        // Retained URLSession resume data is deliberately never reused. A later resume
-        // resolves the original enclosure and starts a fresh validated representation.
-        pausingDownloads.insert(downloadId)
-        task.cancel(byProducingResumeData: { _ in
+        guard let transfer = activeTransfers[downloadId] else { return }
+        let task = transfer.task
+        pausingTaskIdentifiers.insert(task.taskIdentifier)
+        task.cancel(byProducingResumeData: { resumeData in
             DispatchQueue.main.async {
-                self.activeTasks[downloadId] = nil
+                guard self.isCurrent(task, for: downloadId) else { return }
+                if let resumeData {
+                    self.saveRetainedPartial(resumeData, validators: transfer.validators, for: downloadId)
+                } else {
+                    self.clearRetainedPartial(for: downloadId)
+                }
+                self.activeTransfers[downloadId] = nil
+                self.pausingTaskIdentifiers.remove(task.taskIdentifier)
                 IosMediaRuntime.shared.reportDownloadPaused(downloadId: downloadId)
             }
         })
     }
 
     func resumeDownload(downloadId: String, originalEnclosureUrl: String) {
-        guard activeTasks[downloadId] == nil else { return }
+        guard activeTransfers[downloadId] == nil else { return }
         UserDefaults.standard.set(originalEnclosureUrl, forKey: originalKey(downloadId))
         resolveAndStart(downloadId: downloadId, originalEnclosureUrl: originalEnclosureUrl)
     }
@@ -198,8 +248,10 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
         if let file = completedFile(forDownloadID: downloadId) {
             let size = ((try? fileManager.attributesOfItem(atPath: file.path)[.size]) as? NSNumber)?.int64Value ?? 0
             IosMediaRuntime.shared.reportDownloadCompleted(downloadId: downloadId, bytesDownloaded: size)
-        } else if activeTasks[downloadId] != nil || pendingResolutions[downloadId] != nil {
+        } else if activeTransfers[downloadId] != nil || pendingResolutions[downloadId] != nil {
             IosMediaRuntime.shared.reportDownloadQueued(downloadId: downloadId)
+        } else if retainedPartial(for: downloadId) != nil {
+            IosMediaRuntime.shared.reportDownloadPaused(downloadId: downloadId)
         } else {
             IosMediaRuntime.shared.reportDownloadFailed(downloadId: downloadId)
         }
@@ -222,26 +274,44 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
                     IosMediaRuntime.shared.reportDownloadFailed(downloadId: downloadId)
                     return
                 }
-                let task = self.session.downloadTask(with: resolved)
+                let retained = self.retainedPartial(for: downloadId)
+                let task: URLSessionDownloadTask
+                if let retained, self.canSafelyResume(retained, against: resolved.validators) {
+                    self.clearResumeData(for: downloadId)
+                    task = self.session.downloadTask(withResumeData: retained.data)
+                } else {
+                    self.clearRetainedPartial(for: downloadId)
+                    task = self.session.downloadTask(with: resolved.url)
+                }
                 task.taskDescription = downloadId
-                self.activeTasks[downloadId] = task
+                self.saveValidators(resolved.validators, for: downloadId)
+                self.activeTransfers[downloadId] = ActiveTransfer(task: task, validators: resolved.validators)
                 task.resume()
             }
         }
     }
 
-    private func resolveRedirect(for originalURL: URL, completion: @escaping (Result<URL, Error>) -> Void) {
+    private func resolveRedirect(for originalURL: URL, completion: @escaping (Result<ResolvedRepresentation, Error>) -> Void) {
         var request = URLRequest(url: originalURL)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 30
         request.cachePolicy = .reloadIgnoringLocalCacheData
         URLSession(configuration: .ephemeral).dataTask(with: request) { _, response, error in
             if let error { completion(.failure(error)); return }
-            guard let resolved = response?.url, resolved.scheme == "https" else {
+            guard let resolved = response?.url,
+                  resolved.scheme == "https",
+                  let http = response as? HTTPURLResponse else {
                 completion(.failure(URLError(.badServerResponse)))
                 return
             }
-            completion(.success(resolved))
+            let length = response?.expectedContentLength ?? -1
+            completion(.success(ResolvedRepresentation(
+                url: resolved,
+                validators: RepresentationValidators(
+                    eTag: http.value(forHTTPHeaderField: "ETag"),
+                    length: length >= 0 ? length : nil,
+                ),
+            )))
         }.resume()
     }
 
@@ -252,7 +322,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        guard let id = downloadTask.taskDescription else { return }
+        guard let id = currentDownloadID(for: downloadTask) else { return }
         IosMediaRuntime.shared.reportDownloadProgress(
             downloadId: id,
             bytesDownloaded: totalBytesWritten,
@@ -261,7 +331,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let id = downloadTask.taskDescription,
+        guard let id = currentDownloadID(for: downloadTask),
               let response = downloadTask.response as? HTTPURLResponse,
               (200...299).contains(response.statusCode) else { return }
         let size = ((try? fileManager.attributesOfItem(atPath: location.path)[.size]) as? NSNumber)?.int64Value ?? 0
@@ -274,6 +344,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
             try? fileManager.removeItem(at: destination)
             try fileManager.moveItem(at: location, to: destination)
             UserDefaults.standard.set(destination.path, forKey: pathKey(id))
+            clearRetainedPartial(for: id)
             IosMediaRuntime.shared.reportDownloadCompleted(downloadId: id, bytesDownloaded: size)
         } catch {
             IosMediaRuntime.shared.reportDownloadFailed(downloadId: id)
@@ -281,13 +352,13 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let id = task.taskDescription else { return }
+        guard let downloadTask = task as? URLSessionDownloadTask,
+              let id = currentDownloadID(for: downloadTask) else { return }
         DispatchQueue.main.async {
-            self.activeTasks[id] = nil
-            if self.pausingDownloads.remove(id) != nil {
-                IosMediaRuntime.shared.reportDownloadPaused(downloadId: id)
+            if self.pausingTaskIdentifiers.contains(task.taskIdentifier) {
                 return
             }
+            self.activeTransfers[id] = nil
             if error != nil { IosMediaRuntime.shared.reportDownloadFailed(downloadId: id) }
         }
     }
@@ -299,6 +370,65 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
         }
     }
 
+    private func currentDownloadID(for task: URLSessionDownloadTask) -> String? {
+        guard let id = task.taskDescription,
+              activeTransfers[id]?.task.taskIdentifier == task.taskIdentifier else { return nil }
+        return id
+    }
+
+    private func isCurrent(_ task: URLSessionDownloadTask, for downloadId: String) -> Bool {
+        activeTransfers[downloadId]?.task.taskIdentifier == task.taskIdentifier
+    }
+
+    private func retainedPartial(for downloadId: String) -> RetainedPartial? {
+        guard let data = try? Data(contentsOf: resumeDataURL(for: downloadId)),
+              let validators = savedValidatorsOrNil(for: downloadId) else { return nil }
+        return RetainedPartial(data: data, validators: validators)
+    }
+
+    private func saveRetainedPartial(_ data: Data, validators: RepresentationValidators, for downloadId: String) {
+        try? data.write(to: resumeDataURL(for: downloadId), options: .atomic)
+        saveValidators(validators, for: downloadId)
+    }
+
+    private func canSafelyResume(_ retained: RetainedPartial, against latest: RepresentationValidators) -> Bool {
+        guard let savedETag = retained.validators.eTag,
+              let latestETag = latest.eTag,
+              let savedLength = retained.validators.length,
+              let latestLength = latest.length else { return false }
+        return savedETag == latestETag && savedLength == latestLength
+    }
+
+    private func savedValidators(for downloadId: String) -> RepresentationValidators {
+        savedValidatorsOrNil(for: downloadId) ?? RepresentationValidators(eTag: nil, length: nil)
+    }
+
+    private func savedValidatorsOrNil(for downloadId: String) -> RepresentationValidators? {
+        guard let eTag = UserDefaults.standard.string(forKey: Key.resumeETagPrefix + downloadId),
+              let length = UserDefaults.standard.object(forKey: Key.resumeLengthPrefix + downloadId) as? NSNumber else { return nil }
+        return RepresentationValidators(eTag: eTag, length: length.int64Value)
+    }
+
+    private func saveValidators(_ validators: RepresentationValidators, for downloadId: String) {
+        if let eTag = validators.eTag, let length = validators.length {
+            UserDefaults.standard.set(eTag, forKey: Key.resumeETagPrefix + downloadId)
+            UserDefaults.standard.set(length, forKey: Key.resumeLengthPrefix + downloadId)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Key.resumeETagPrefix + downloadId)
+            UserDefaults.standard.removeObject(forKey: Key.resumeLengthPrefix + downloadId)
+        }
+    }
+
+    private func clearResumeData(for downloadId: String) {
+        try? fileManager.removeItem(at: resumeDataURL(for: downloadId))
+    }
+
+    private func clearRetainedPartial(for downloadId: String) {
+        clearResumeData(for: downloadId)
+        UserDefaults.standard.removeObject(forKey: Key.resumeETagPrefix + downloadId)
+        UserDefaults.standard.removeObject(forKey: Key.resumeLengthPrefix + downloadId)
+    }
+
     private var downloadDirectory: URL {
         let directory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TWiTGoMedia", isDirectory: true)
@@ -308,8 +438,9 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
 
     private func removeDownload(_ id: String) {
         pendingResolutions[id] = nil
-        activeTasks[id]?.cancel()
-        activeTasks[id] = nil
+        activeTransfers[id]?.task.cancel()
+        activeTransfers[id] = nil
+        clearRetainedPartial(for: id)
         if let path = UserDefaults.standard.string(forKey: pathKey(id)) { try? fileManager.removeItem(atPath: path) }
         UserDefaults.standard.removeObject(forKey: originalKey(id))
         UserDefaults.standard.removeObject(forKey: pathKey(id))
@@ -336,6 +467,9 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
 
     private func originalKey(_ id: String) -> String { Key.originalPrefix + id }
     private func pathKey(_ id: String) -> String { Key.pathPrefix + id }
+    private func resumeDataURL(for id: String) -> URL {
+        downloadDirectory.appendingPathComponent("resume-" + fileName(id))
+    }
     private func fileName(_ id: String) -> String { Data(id.utf8).base64EncodedString() }
 }
 
