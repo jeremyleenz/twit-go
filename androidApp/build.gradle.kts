@@ -27,6 +27,8 @@ dependencies {
     implementation(project(":shared"))
     implementation(libs.androidx.activity.compose)
     implementation(compose.runtime)
+    implementation(compose.foundation)
+    implementation(compose.material3)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.database)
     implementation(libs.media3.datasource)
