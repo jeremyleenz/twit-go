@@ -131,7 +131,7 @@ private fun com.example.twitgo.media.DownloadState?.statusText(): String = when 
     null -> "Not downloaded"
     DownloadPhase.QUEUED -> "Download queued"
     DownloadPhase.DOWNLOADING -> "Downloading ${bytesDownloaded / (1024 * 1024)} MB"
-    DownloadPhase.PAUSED -> "Download paused; partial retained"
+    DownloadPhase.PAUSED -> "Download paused"
     DownloadPhase.COMPLETED -> "Downloaded and ready offline"
     DownloadPhase.FAILED -> "Download failed: ${failure ?: "unknown error"}"
 }
