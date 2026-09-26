@@ -30,7 +30,6 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
-/** Release implementation of the shared download contract using Media3's persistent index/cache. */
 @UnstableApi
 class AndroidDownloadController(private val context: Context) : DownloadController {
     private val manager = AndroidMediaStore.downloadManager(context)

@@ -11,7 +11,6 @@ import androidx.media3.exoplayer.offline.DownloadService
 import androidx.media3.exoplayer.scheduler.Scheduler
 import androidx.media3.exoplayer.workmanager.WorkManagerScheduler
 
-/** Release service that keeps Media3 transfers alive and schedules network-constrained retry. */
 @UnstableApi
 class Media3DownloadService : DownloadService(NOTIFICATION_ID) {
     override fun onCreate() {
