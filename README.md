@@ -13,4 +13,4 @@ TWiT Go is an independent Android and iOS companion for discovering, listening t
 - Android: with JDK 17 and Android SDK Platform 37 installed, run `./gradlew :androidApp:assembleDebug`.
 - iOS: open `iosApp/TWiTGo.xcodeproj` in Xcode 26.4.x, select the `TWiTGo` scheme and a signing team, then run the app. The build phase compiles the shared Kotlin framework.
 
-Dependency versions are pinned in `gradle/libs.versions.toml`; CI build commands are in `.github/workflows/build.yml`. The `com.example.twitgo` app ID is a placeholder and must be replaced before distribution.
+Dependency versions are pinned in `gradle/libs.versions.toml`; CI build commands are in `.github/workflows/build.yml`. Android and iOS use the application identifier `nz.jeremylee.twitgo`.

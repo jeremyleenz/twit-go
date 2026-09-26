@@ -10,7 +10,7 @@ plugins {
 
 kotlin {
     android {
-        namespace = "com.example.twitgo.shared"
+        namespace = "nz.jeremylee.twitgo.shared"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
         compilerOptions {

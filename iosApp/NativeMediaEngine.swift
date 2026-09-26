@@ -22,7 +22,7 @@ final class NativeMediaAppDelegate: NSObject, UIApplicationDelegate {
 /** AVFoundation implementation called by the Kotlin iOS adapters. */
 final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloadDelegate {
     static let shared = NativeMediaEngine()
-    static let sessionID = "com.example.twitgo.media-download"
+    static let sessionID = "nz.jeremylee.twitgo.media-download"
 
     var backgroundCompletionHandler: (() -> Void)?
     private let player = AVPlayer()

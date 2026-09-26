@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.twitgo"
+    namespace = "nz.jeremylee.twitgo"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "com.example.twitgo"
+        applicationId = "nz.jeremylee.twitgo"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1

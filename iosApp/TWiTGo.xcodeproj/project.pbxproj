@@ -241,7 +241,7 @@
 					"-framework",
 					TWiTShared,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.twitgo;
+				PRODUCT_BUNDLE_IDENTIFIER = nz.jeremylee.twitgo;
 				PRODUCT_NAME = TWiTGo;
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;
@@ -270,7 +270,7 @@
 					"-framework",
 					TWiTShared,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.twitgo;
+				PRODUCT_BUNDLE_IDENTIFIER = nz.jeremylee.twitgo;
 				PRODUCT_NAME = TWiTGo;
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;
