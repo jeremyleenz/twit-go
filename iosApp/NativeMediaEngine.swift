@@ -28,9 +28,12 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     private let fileManager = FileManager.default
     private var activeTasks: [String: URLSessionDownloadTask] = [:]
     private var pausingDownloads = Set<String>()
-    private var currentURL: String?
-    private var currentTitle: String?
+    private var pendingResolutions: [String: UUID] = [:]
+    private var currentDownloadID: String?
     private var timeObserver: Any?
+    private var itemStatusObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var wantsPlayback = false
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.sessionID)
@@ -42,6 +45,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     private enum Key {
         static let playbackURL = "media.playback.url"
         static let playbackTitle = "media.playback.title"
+        static let playbackDownloadID = "media.playback.download-id"
         static let playbackPosition = "media.playback.position"
         static let originalPrefix = "media.download.original."
         static let pathPrefix = "media.download.path."
@@ -55,8 +59,13 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
             forInterval: CMTime(seconds: 1, preferredTimescale: 1),
             queue: .main
         ) { [weak self] _ in
-            self?.savePlaybackProgress()
-            IosMediaRuntime.shared.reportPlaybackPlaying(positionMs: self?.player.currentTime().milliseconds ?? 0)
+            guard let self, self.player.timeControlStatus == .playing else { return }
+            self.savePlaybackProgress()
+            IosMediaRuntime.shared.reportPlaybackPlaying(positionMs: self.player.currentTime().milliseconds)
+        }
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            guard let self, player.timeControlStatus == .playing, self.currentDownloadID != nil else { return }
+            IosMediaRuntime.shared.reportPlaybackPlaying(positionMs: player.currentTime().milliseconds)
         }
         _ = session
         restorePlayback()
@@ -74,32 +83,62 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
         if let timeObserver { player.removeTimeObserver(timeObserver) }
     }
 
-    func loadPlayback(originalEnclosureUrl: String, title: String, startPositionMs: Int64) {
-        currentURL = originalEnclosureUrl
-        currentTitle = title
+    func loadPlayback(downloadId: String, originalEnclosureUrl: String, title: String, startPositionMs: Int64) {
+        currentDownloadID = downloadId
+        wantsPlayback = false
         UserDefaults.standard.set(originalEnclosureUrl, forKey: Key.playbackURL)
         UserDefaults.standard.set(title, forKey: Key.playbackTitle)
-        let url = completedFile(forOriginalURL: originalEnclosureUrl) ?? URL(string: originalEnclosureUrl)
+        UserDefaults.standard.set(downloadId, forKey: Key.playbackDownloadID)
+        let url = completedFile(forDownloadID: downloadId) ?? URL(string: originalEnclosureUrl)
         guard let url else {
             IosMediaRuntime.shared.reportPlaybackFailed()
             return
         }
         player.pause()
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
-        player.seek(to: CMTime(milliseconds: startPositionMs)) { _ in
-            IosMediaRuntime.shared.reportPlaybackReady(positionMs: startPositionMs)
+        let item = AVPlayerItem(url: url)
+        player.replaceCurrentItem(with: item)
+        itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] observedItem, _ in
+            DispatchQueue.main.async {
+                guard let self, self.player.currentItem === observedItem else { return }
+                switch observedItem.status {
+                case .readyToPlay:
+                    self.player.seek(to: CMTime(milliseconds: startPositionMs)) { [weak self] _ in
+                        guard let self, self.player.currentItem === observedItem else { return }
+                        if self.wantsPlayback {
+                            self.player.play()
+                        } else {
+                            IosMediaRuntime.shared.reportPlaybackReady(positionMs: self.player.currentTime().milliseconds)
+                        }
+                    }
+                case .failed:
+                    IosMediaRuntime.shared.reportPlaybackFailed()
+                default:
+                    break
+                }
+            }
         }
     }
 
     func play() {
-        player.play()
-        IosMediaRuntime.shared.reportPlaybackPlaying(positionMs: player.currentTime().milliseconds)
+        wantsPlayback = true
+        guard let item = player.currentItem else {
+            IosMediaRuntime.shared.reportPlaybackFailed()
+            return
+        }
+        switch item.status {
+        case .readyToPlay: player.play()
+        case .failed: IosMediaRuntime.shared.reportPlaybackFailed()
+        default: break
+        }
     }
 
     func pause() {
+        wantsPlayback = false
         player.pause()
         savePlaybackProgress()
-        IosMediaRuntime.shared.reportPlaybackPaused(positionMs: player.currentTime().milliseconds)
+        if player.currentItem?.status == .readyToPlay {
+            IosMediaRuntime.shared.reportPlaybackPaused(positionMs: player.currentTime().milliseconds)
+        }
     }
 
     func seekTo(positionMs: Int64) {
@@ -113,10 +152,14 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     func setSpeed(speed: Float) { player.rate = speed }
 
     func stopPlayback() {
+        wantsPlayback = false
+        currentDownloadID = nil
+        itemStatusObservation = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         UserDefaults.standard.removeObject(forKey: Key.playbackURL)
         UserDefaults.standard.removeObject(forKey: Key.playbackTitle)
+        UserDefaults.standard.removeObject(forKey: Key.playbackDownloadID)
         UserDefaults.standard.removeObject(forKey: Key.playbackPosition)
     }
 
@@ -127,6 +170,10 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     }
 
     func pauseDownload(downloadId: String) {
+        if pendingResolutions.removeValue(forKey: downloadId) != nil {
+            IosMediaRuntime.shared.reportDownloadPaused(downloadId: downloadId)
+            return
+        }
         guard let task = activeTasks[downloadId] else { return }
         // Retained URLSession resume data is deliberately never reused. A later resume
         // resolves the original enclosure and starts a fresh validated representation.
@@ -147,15 +194,30 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
 
     func deleteDownload(downloadId: String) { removeDownload(downloadId) }
 
+    func reconcileDownload(downloadId: String) {
+        if let file = completedFile(forDownloadID: downloadId) {
+            let size = ((try? fileManager.attributesOfItem(atPath: file.path)[.size]) as? NSNumber)?.int64Value ?? 0
+            IosMediaRuntime.shared.reportDownloadCompleted(downloadId: downloadId, bytesDownloaded: size)
+        } else if activeTasks[downloadId] != nil || pendingResolutions[downloadId] != nil {
+            IosMediaRuntime.shared.reportDownloadQueued(downloadId: downloadId)
+        } else {
+            IosMediaRuntime.shared.reportDownloadFailed(downloadId: downloadId)
+        }
+    }
+
     private func resolveAndStart(downloadId: String, originalEnclosureUrl: String) {
         guard let original = URL(string: originalEnclosureUrl), original.scheme == "https" else {
             IosMediaRuntime.shared.reportDownloadFailed(downloadId: downloadId)
             return
         }
+        let token = UUID()
+        pendingResolutions[downloadId] = token
         IosMediaRuntime.shared.reportDownloadQueued(downloadId: downloadId)
         resolveRedirect(for: original) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.pendingResolutions[downloadId] == token else { return }
+                self.pendingResolutions[downloadId] = nil
                 guard case let .success(resolved) = result else {
                     IosMediaRuntime.shared.reportDownloadFailed(downloadId: downloadId)
                     return
@@ -245,6 +307,7 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
     }
 
     private func removeDownload(_ id: String) {
+        pendingResolutions[id] = nil
         activeTasks[id]?.cancel()
         activeTasks[id] = nil
         if let path = UserDefaults.standard.string(forKey: pathKey(id)) { try? fileManager.removeItem(atPath: path) }
@@ -252,26 +315,22 @@ final class NativeMediaEngine: NSObject, IosNativeMediaEngine, URLSessionDownloa
         UserDefaults.standard.removeObject(forKey: pathKey(id))
     }
 
-    private func completedFile(forOriginalURL original: String) -> URL? {
-        UserDefaults.standard.dictionaryRepresentation().first { key, value in
-            key.hasPrefix(Key.originalPrefix) && value as? String == original
-        }.flatMap { entry in
-            let id = String(entry.key.dropFirst(Key.originalPrefix.count))
-            guard let path = UserDefaults.standard.string(forKey: pathKey(id)), fileManager.fileExists(atPath: path) else { return nil }
-            return URL(fileURLWithPath: path)
-        }
+    private func completedFile(forDownloadID id: String) -> URL? {
+        guard let path = UserDefaults.standard.string(forKey: pathKey(id)), fileManager.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
     }
 
     private func restorePlayback() {
         guard let url = UserDefaults.standard.string(forKey: Key.playbackURL),
-              let title = UserDefaults.standard.string(forKey: Key.playbackTitle) else { return }
+              let title = UserDefaults.standard.string(forKey: Key.playbackTitle),
+              let downloadID = UserDefaults.standard.string(forKey: Key.playbackDownloadID) else { return }
         let position = Int64(UserDefaults.standard.double(forKey: Key.playbackPosition) * 1_000)
-        IosMediaRuntime.shared.restorePlayback(originalEnclosureUrl: url, title: title, positionMs: position)
-        loadPlayback(originalEnclosureUrl: url, title: title, startPositionMs: position)
+        IosMediaRuntime.shared.restorePlayback(downloadId: downloadID, originalEnclosureUrl: url, title: title, positionMs: position)
+        loadPlayback(downloadId: downloadID, originalEnclosureUrl: url, title: title, startPositionMs: position)
     }
 
     private func savePlaybackProgress() {
-        guard currentURL != nil else { return }
+        guard currentDownloadID != nil else { return }
         UserDefaults.standard.set(Double(player.currentTime().milliseconds) / 1_000, forKey: Key.playbackPosition)
     }
 

@@ -16,10 +16,11 @@ import com.example.twitgo.media.PlaybackState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import platform.Foundation.NSUserDefaults
 
 /** Swift implements native AVFoundation work; these adapters keep the shared contract authoritative. */
 interface IosNativeMediaEngine {
-    fun loadPlayback(originalEnclosureUrl: String, title: String, startPositionMs: Long)
+    fun loadPlayback(downloadId: String, originalEnclosureUrl: String, title: String, startPositionMs: Long)
     fun play()
     fun pause()
     fun seekTo(positionMs: Long)
@@ -29,6 +30,7 @@ interface IosNativeMediaEngine {
     fun pauseDownload(downloadId: String)
     fun resumeDownload(downloadId: String, originalEnclosureUrl: String)
     fun deleteDownload(downloadId: String)
+    fun reconcileDownload(downloadId: String)
 }
 
 /** Entry points used by the native engine to report actual AVFoundation state to shared Compose. */
@@ -37,8 +39,8 @@ object IosMediaRuntime {
 
     fun install(engine: IosNativeMediaEngine) = adapters.install(engine)
 
-    fun restorePlayback(originalEnclosureUrl: String, title: String, positionMs: Long) =
-        adapters.playback.restore(originalEnclosureUrl, title, positionMs)
+    fun restorePlayback(downloadId: String, originalEnclosureUrl: String, title: String, positionMs: Long) =
+        adapters.playback.restore(downloadId, originalEnclosureUrl, title, positionMs)
 
     fun reportPlaybackReady(positionMs: Long) = adapters.playback.reportReady(positionMs)
     fun reportPlaybackPlaying(positionMs: Long) = adapters.playback.reportPlaying(positionMs)
@@ -79,7 +81,7 @@ internal class IosPlaybackController(
             source = PlaybackSource.REMOTE,
             positionMs = startPositionMs.coerceAtLeast(0),
         )
-        engine().loadPlayback(item.originalEnclosureUrl, item.title, startPositionMs.coerceAtLeast(0))
+        engine().loadPlayback(item.downloadId(), item.originalEnclosureUrl, item.title, startPositionMs.coerceAtLeast(0))
     }
 
     override suspend fun play() = engine().play()
@@ -92,9 +94,16 @@ internal class IosPlaybackController(
         mutableState.value = PlaybackState()
     }
 
-    fun restore(originalEnclosureUrl: String, title: String, positionMs: Long) {
+    fun restore(downloadId: String, originalEnclosureUrl: String, title: String, positionMs: Long) {
+        val id = downloadId.toMediaIdOrNull() ?: MediaId(originalEnclosureUrl, "default")
         mutableState.value = PlaybackState(
-            item = restoredItem(originalEnclosureUrl, title),
+            item = MediaItem(
+                id = id,
+                kind = MediaKind.AUDIO,
+                originalEnclosureUrl = originalEnclosureUrl,
+                title = title,
+                showTitle = "TWiT Go",
+            ),
             phase = PlaybackPhase.READY,
             source = PlaybackSource.REMOTE,
             positionMs = positionMs.coerceAtLeast(0),
@@ -113,27 +122,28 @@ internal class IosPlaybackController(
         if (prior.item != null) mutableState.value = prior.copy(phase = phase, positionMs = positionMs.coerceAtLeast(0))
     }
 
-    private fun restoredItem(url: String, title: String) = MediaItem(
-        id = MediaId(url, "default"),
-        kind = MediaKind.AUDIO,
-        originalEnclosureUrl = url,
-        title = title,
-        showTitle = "TWiT Go",
-    )
 }
 
 internal class IosDownloadController(
     private val engine: () -> IosNativeMediaEngine,
 ) : DownloadController {
+    private val records = IosDownloadRecords
     private val items = mutableMapOf<String, MediaItem>()
     private val mutableState = MutableStateFlow(DownloadSnapshot(isReconciled = true))
     override val state: StateFlow<DownloadSnapshot> = mutableState.asStateFlow()
 
-    override suspend fun reconcile() = Unit
+    override suspend fun reconcile() {
+        records.all().forEach { item ->
+            val downloadId = item.downloadId()
+            items[downloadId] = item
+            engine().reconcileDownload(downloadId)
+        }
+    }
 
     override suspend fun enqueue(item: MediaItem, networkPolicy: DownloadNetworkPolicy) {
         val id = item.downloadId()
         items[id] = item
+        records.save(item)
         update(id, DownloadState(item, DownloadPhase.QUEUED))
         engine().enqueueDownload(id, item.originalEnclosureUrl)
     }
@@ -147,6 +157,7 @@ internal class IosDownloadController(
     override suspend fun resume(item: MediaItem, networkPolicy: DownloadNetworkPolicy) {
         val id = item.downloadId()
         items[id] = item
+        records.save(item)
         update(id, DownloadState(item, DownloadPhase.QUEUED))
         engine().resumeDownload(id, item.originalEnclosureUrl)
     }
@@ -157,6 +168,7 @@ internal class IosDownloadController(
         val downloadId = id.toDownloadId()
         engine().deleteDownload(downloadId)
         items.remove(downloadId)
+        records.remove(downloadId)
         mutableState.value = mutableState.value.copy(items = mutableState.value.items - id)
     }
 
@@ -181,3 +193,77 @@ private fun MediaId.toDownloadId(): String =
     "${episodeKey.length}:$episodeKey:${variantKey.length}:$variantKey"
 
 private fun MediaItem.downloadId(): String = id.toDownloadId()
+
+private fun String.toMediaIdOrNull(): MediaId? = runCatching {
+    var cursor = 0
+    fun next(): String {
+        val separator = indexOf(':', cursor)
+        require(separator >= cursor)
+        val fieldLength = substring(cursor, separator).toInt()
+        val start = separator + 1
+        val end = start + fieldLength
+        require(end <= this.length)
+        cursor = end
+        return substring(start, end)
+    }
+    val episodeKey = next()
+    require(cursor < length && this[cursor] == ':')
+    cursor += 1
+    val variantKey = next()
+    require(cursor == length)
+    MediaId(episodeKey, variantKey)
+}.getOrNull()
+
+/** iOS stores source metadata separately from native file paths so shared state can reconcile on launch. */
+private object IosDownloadRecords {
+    private const val PREFIX = "twitgo.download.record."
+    private val defaults get() = NSUserDefaults.standardUserDefaults
+
+    fun save(item: MediaItem) {
+        defaults.setObject(encode(item), forKey = PREFIX + item.downloadId())
+    }
+
+    fun remove(downloadId: String) {
+        defaults.removeObjectForKey(PREFIX + downloadId)
+    }
+
+    fun all(): List<MediaItem> = defaults.dictionaryRepresentation()
+        .mapNotNull { (key, value) ->
+            (key as? String)?.takeIf { it.startsWith(PREFIX) }
+                ?.let { value as? String }
+                ?.let(::decode)
+        }
+
+    private fun encode(item: MediaItem): String = listOf(
+        item.id.episodeKey,
+        item.id.variantKey,
+        item.kind.name,
+        item.originalEnclosureUrl,
+        item.title,
+        item.showTitle,
+        item.artworkUrl.orEmpty(),
+    ).joinToString(separator = "") { "${it.length}:$it" }
+
+    private fun decode(value: String): MediaItem? = runCatching {
+        var cursor = 0
+        fun next(): String {
+            val separator = value.indexOf(':', cursor)
+            require(separator >= cursor)
+            val fieldLength = value.substring(cursor, separator).toInt()
+            val start = separator + 1
+            val end = start + fieldLength
+            require(end <= value.length)
+            cursor = end
+            return value.substring(start, end)
+        }
+        val episodeKey = next()
+        val variantKey = next()
+        val kind = MediaKind.valueOf(next())
+        val url = next()
+        val title = next()
+        val showTitle = next()
+        val artworkUrl = next().ifBlank { null }
+        require(cursor == value.length)
+        MediaItem(MediaId(episodeKey, variantKey), kind, url, title, showTitle, artworkUrl)
+    }.getOrNull()
+}
