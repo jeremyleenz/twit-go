@@ -6,6 +6,10 @@
     <true/>
     <key>CFBundleDisplayName</key>
     <string>TWiT Go</string>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
     <key>UILaunchScreen</key>
     <dict/>
 </dict>

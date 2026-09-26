@@ -1,21 +1,15 @@
 import SwiftUI
 import UIKit
-import TWiTShared
 
 @main
 struct TWiTGoApp: SwiftUI.App {
+    @UIApplicationDelegateAdaptor(MediaProbeAppDelegate.self) private var mediaProbeDelegate
+
+    init() { _ = DownloadProbeManager.shared }
+
     var body: some Scene {
         WindowGroup {
-            SharedContentView()
-                .ignoresSafeArea()
+            MediaProbeView()
         }
     }
-}
-
-private struct SharedContentView: UIViewControllerRepresentable {
-    func makeUIViewController(context: Context) -> UIViewController {
-        MainViewControllerKt.MainViewController()
-    }
-
-    func updateUIViewController(_ controller: UIViewController, context: Context) {}
 }

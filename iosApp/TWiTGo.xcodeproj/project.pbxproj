@@ -9,11 +9,15 @@
 /* Begin PBXBuildFile section */
 		3B55A0D3256711332211C27A /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 42B7B9F199CD07E255855388 /* Foundation.framework */; };
 		AFD31A692E72DB01360AE8DE /* TWiTGoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 583811BFA248CAA58804ED5F /* TWiTGoApp.swift */; };
+		A90F3029B125A8D1CB42A713 /* MediaProbeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90F3029B125A8D1CB42A714 /* MediaProbeView.swift */; };
+		B20A1E112CA90011E223A001 /* DownloadProbeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20A1E112CA90011E223A002 /* DownloadProbeManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		42B7B9F199CD07E255855388 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS14.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		583811BFA248CAA58804ED5F /* TWiTGoApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TWiTGoApp.swift; sourceTree = "<group>"; };
+		A90F3029B125A8D1CB42A714 /* MediaProbeView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MediaProbeView.swift; sourceTree = "<group>"; };
+		B20A1E112CA90011E223A002 /* DownloadProbeManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DownloadProbeManager.swift; sourceTree = "<group>"; };
 		C17D8F7DC6ABC272E9AC1938 /* TWiTGo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TWiTGo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -43,6 +47,8 @@
 				DF18DD76A24CC52C75DF25F7 /* Products */,
 				BE479EF576516F2F3F773121 /* Frameworks */,
 				583811BFA248CAA58804ED5F /* TWiTGoApp.swift */,
+				A90F3029B125A8D1CB42A714 /* MediaProbeView.swift */,
+				B20A1E112CA90011E223A002 /* DownloadProbeManager.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -147,6 +153,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				AFD31A692E72DB01360AE8DE /* TWiTGoApp.swift in Sources */,
+				A90F3029B125A8D1CB42A713 /* MediaProbeView.swift in Sources */,
+				B20A1E112CA90011E223A001 /* DownloadProbeManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
