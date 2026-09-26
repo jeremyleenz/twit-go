@@ -11,12 +11,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import nz.jeremylee.twitgo.media.DownloadController
 import nz.jeremylee.twitgo.media.DownloadNetworkPolicy
 import nz.jeremylee.twitgo.media.DownloadPhase
@@ -42,8 +42,8 @@ fun App(
         return
     }
     val scope = rememberCoroutineScope()
-    val playback by activePlaybackController.state.collectAsState()
-    val downloads by activeDownloadController.state.collectAsState()
+    val playback by activePlaybackController.state.collectAsStateWithLifecycle()
+    val downloads by activeDownloadController.state.collectAsStateWithLifecycle()
     val download = downloads.items[sampleMedia.id]
 
     MaterialTheme {
