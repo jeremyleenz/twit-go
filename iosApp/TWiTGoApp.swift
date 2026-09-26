@@ -1,15 +1,26 @@
 import SwiftUI
 import UIKit
+import TWiTShared
 
 @main
 struct TWiTGoApp: SwiftUI.App {
-    @UIApplicationDelegateAdaptor(MediaProbeAppDelegate.self) private var mediaProbeDelegate
+    @UIApplicationDelegateAdaptor(NativeMediaAppDelegate.self) private var nativeMediaDelegate
 
-    init() { _ = DownloadProbeManager.shared }
+    init() {
+        IosMediaRuntime.shared.install(engine: NativeMediaEngine.shared)
+    }
 
     var body: some Scene {
         WindowGroup {
-            MediaProbeView()
+            SharedContentView()
         }
     }
+}
+
+private struct SharedContentView: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController {
+        MainViewControllerKt.MainViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
 }

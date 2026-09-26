@@ -27,6 +27,7 @@ internal object AndroidMediaStore {
     private var databaseInstance: StandaloneDatabaseProvider? = null
     private var cacheInstance: SimpleCache? = null
     private var managerInstance: DownloadManager? = null
+    private var playbackPlayerInstance: ExoPlayer? = null
 
     @Synchronized
     fun downloadManager(context: Context): DownloadManager = managerInstance ?: DownloadManager(
@@ -58,11 +59,17 @@ internal object AndroidMediaStore {
         database(context),
     ).also { cacheInstance = it }
 
-    fun createPlayer(context: Context): ExoPlayer = ExoPlayer.Builder(context)
+    fun playbackPlayer(context: Context): ExoPlayer = playbackPlayerInstance ?: ExoPlayer.Builder(context.applicationContext)
         .setMediaSourceFactory(
             DefaultMediaSourceFactory(context).setDataSourceFactory(playbackDataSource(context)),
         )
-        .build()
+        .build().also { player ->
+            AndroidPlaybackPersistence.restore(context)?.let { saved ->
+                player.setMediaItem(saved.item.toPlatformMediaItem(), saved.positionMs)
+                player.prepare()
+            }
+            playbackPlayerInstance = player
+        }
 
     fun playbackDataSource(context: Context): DataSource.Factory = CacheDataSource.Factory()
         .setCache(cache(context))
@@ -86,4 +93,11 @@ internal fun com.example.twitgo.media.MediaItem.downloadId(): String =
 internal fun Download.bytesTotalOrNull(): Long? = contentLength.takeIf { it != C.LENGTH_UNSET.toLong() && it >= 0 }
 
 internal fun com.example.twitgo.media.MediaItem.toPlatformMediaItem(): MediaItem =
-    MediaItem.Builder().setUri(originalEnclosureUrl).setMediaId(downloadId()).build()
+    MediaItem.Builder()
+        .setUri(originalEnclosureUrl)
+        .setMediaId(downloadId())
+        .setCustomCacheKey(mediaCacheKey())
+        .build()
+
+/** Cache identity follows feed identity, so a refreshed CDN enclosure reads the completed asset. */
+internal fun com.example.twitgo.media.MediaItem.mediaCacheKey(): String = downloadId()

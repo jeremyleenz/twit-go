@@ -1,9 +1,11 @@
 package com.example.twitgo
 
 import android.content.Context
+import android.content.Intent
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.core.content.ContextCompat
 import com.example.twitgo.media.MediaFailure
 import com.example.twitgo.media.PlaybackController
 import com.example.twitgo.media.PlaybackPhase
@@ -16,11 +18,19 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /** Native playback implementation. The future player screen owns the PlayerView surface. */
 class AndroidPlaybackController(private val context: Context) : PlaybackController {
-    private val player = AndroidMediaStore.createPlayer(context)
+    private val player = AndroidMediaStore.playbackPlayer(context)
     private val mutableState = MutableStateFlow(PlaybackState())
     override val state: StateFlow<PlaybackState> = mutableState.asStateFlow()
 
     init {
+        AndroidPlaybackPersistence.restore(context)?.let { saved ->
+            mutableState.value = PlaybackState(
+                item = saved.item,
+                phase = PlaybackPhase.READY,
+                source = sourceFor(saved.item),
+                positionMs = saved.positionMs,
+            )
+        }
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) = publish()
             override fun onIsPlayingChanged(isPlaying: Boolean) = publish()
@@ -40,12 +50,14 @@ class AndroidPlaybackController(private val context: Context) : PlaybackControll
             PlaybackSource.REMOTE
         }
         mutableState.value = PlaybackState(item = item, phase = PlaybackPhase.LOADING, source = source)
+        AndroidPlaybackPersistence.save(context, item, startPositionMs)
         player.setMediaItem(item.toPlatformMediaItem(), startPositionMs)
         player.prepare()
         publish()
     }
 
     override suspend fun play() {
+        ContextCompat.startForegroundService(context, Intent(context, AndroidPlaybackService::class.java))
         player.play()
         publish()
     }
@@ -57,6 +69,7 @@ class AndroidPlaybackController(private val context: Context) : PlaybackControll
 
     override suspend fun seekTo(positionMs: Long) {
         player.seekTo(positionMs.coerceAtLeast(0))
+        AndroidPlaybackPersistence.updatePosition(context, player.currentPosition)
         publish()
     }
 
@@ -67,6 +80,7 @@ class AndroidPlaybackController(private val context: Context) : PlaybackControll
 
     override suspend fun stop() {
         player.stop()
+        AndroidPlaybackPersistence.clear(context)
         mutableState.value = PlaybackState()
     }
 
@@ -89,5 +103,9 @@ class AndroidPlaybackController(private val context: Context) : PlaybackControll
             speed = player.playbackParameters.speed,
             failure = null,
         )
+        AndroidPlaybackPersistence.updatePosition(context, player.currentPosition)
     }
+
+    private fun sourceFor(item: MediaItem): PlaybackSource =
+        if (AndroidMediaStore.isOfflineReady(context, item.downloadId())) PlaybackSource.OFFLINE else PlaybackSource.REMOTE
 }

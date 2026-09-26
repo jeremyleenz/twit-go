@@ -1,6 +1,6 @@
 # TWiT Go
 
-TWiT Go is an independent, unofficial Android and iOS companion for discovering, listening to, and watching TWiT's public shows. Playback, downloads, and the catalog are planned; this repository currently contains the app scaffold.
+TWiT Go is an independent Android and iOS companion for discovering, listening to, and watching TWiT's public shows. This repository contains a Kotlin Multiplatform media spike: shared Compose controls with native playback and offline-download adapters. The public RSS catalog UI follows in the next iteration.
 
 ## Project layout
 

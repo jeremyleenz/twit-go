@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.offline.Download
  * data partition prevents Media3 from persisting its own state.
  */
 internal object AndroidDownloadStoragePolicy {
+    const val MINIMUM_START_FREE_BYTES = 500L * 1024 * 1024
     const val ACTIVE_STORAGE_RESERVE_BYTES = 32L * 1024 * 1024
     const val ACTIVE_STORAGE_STOP_REASON = 2
 

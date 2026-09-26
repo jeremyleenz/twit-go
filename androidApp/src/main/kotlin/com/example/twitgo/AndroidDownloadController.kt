@@ -37,6 +37,7 @@ class AndroidDownloadController(private val context: Context) : DownloadControll
     private val records = DownloadRecords(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutableState = MutableStateFlow(DownloadSnapshot())
+    private val admissionFailures = mutableMapOf<MediaId, DownloadState>()
     override val state: StateFlow<DownloadSnapshot> = mutableState.asStateFlow()
 
     init {
@@ -54,12 +55,13 @@ class AndroidDownloadController(private val context: Context) : DownloadControll
     override suspend fun reconcile() = refresh()
 
     override suspend fun enqueue(item: MediaItem, networkPolicy: DownloadNetworkPolicy) {
+        if (!admitTransfer(item)) return
         records.put(item, RepresentationProbe.observe(item.originalEnclosureUrl))
         setNetworkPolicy(networkPolicy)
         DownloadService.sendAddDownload(
             context,
             Media3DownloadService::class.java,
-            DownloadRequest.Builder(item.downloadId(), Uri.parse(item.originalEnclosureUrl)).build(),
+            item.toDownloadRequest(),
             false,
         )
         refresh()
@@ -79,15 +81,17 @@ class AndroidDownloadController(private val context: Context) : DownloadControll
     override suspend fun resume(item: MediaItem, networkPolicy: DownloadNetworkPolicy) {
         val id = item.downloadId()
         val existing = manager.downloadIndex.getDownload(id)
+        if (existing?.state != Download.STATE_COMPLETED && !admitTransfer(item)) return
         val stored = records.get(id)
         val freshRepresentation = RepresentationProbe.observe(item.originalEnclosureUrl)
+        admissionFailures.remove(item.id)
         setNetworkPolicy(networkPolicy)
         if (existing == null) {
             records.put(item, freshRepresentation)
             DownloadService.sendAddDownload(
                 context,
                 Media3DownloadService::class.java,
-                DownloadRequest.Builder(id, Uri.parse(item.originalEnclosureUrl)).build(),
+                item.toDownloadRequest(),
                 false,
             )
         } else if (existing.state != Download.STATE_COMPLETED &&
@@ -99,7 +103,7 @@ class AndroidDownloadController(private val context: Context) : DownloadControll
             DownloadService.sendAddDownload(
                 context,
                 Media3DownloadService::class.java,
-                DownloadRequest.Builder(id, Uri.parse(item.originalEnclosureUrl)).build(),
+                item.toDownloadRequest(),
                 false,
             )
         } else {
@@ -122,6 +126,7 @@ class AndroidDownloadController(private val context: Context) : DownloadControll
     private suspend fun remove(id: MediaId) {
         DownloadService.sendRemoveDownload(context, Media3DownloadService::class.java, id.toDownloadId(), false)
         records.remove(id.toDownloadId())
+        admissionFailures.remove(id)
         refresh()
     }
 
@@ -139,13 +144,33 @@ class AndroidDownloadController(private val context: Context) : DownloadControll
         )
     }
 
+    /** Apply the 500 MB reserve to every path that can start a network transfer. */
+    private suspend fun admitTransfer(item: MediaItem): Boolean {
+        val storage = AndroidDownloadStoragePolicy.storagePreflight(
+            context,
+            AndroidDownloadStoragePolicy.MINIMUM_START_FREE_BYTES,
+        )
+        if (storage.hasEnoughSpace) {
+            admissionFailures.remove(item.id)
+            return true
+        }
+        admissionFailures[item.id] = DownloadState(
+            item = item,
+            phase = DownloadPhase.FAILED,
+            failure = MediaFailure.INSUFFICIENT_STORAGE,
+        )
+        refresh()
+        return false
+    }
+
     private suspend fun refresh() = withContext(Dispatchers.IO) {
         mutableState.value = DownloadSnapshot(isReconciled = false)
-        val entries = records.all().mapNotNull { record ->
+        val entries = admissionFailures.toMutableMap()
+        entries.putAll(records.all().mapNotNull { record ->
             val item = record.item
             val download = manager.downloadIndex.getDownload(item.downloadId()) ?: return@mapNotNull null
             item.id to download.toSharedState(item)
-        }.toMap()
+        }.toMap())
         mutableState.value = DownloadSnapshot(isReconciled = true, items = entries)
     }
 
@@ -183,6 +208,11 @@ internal fun downloadFailure(state: Int, stopReason: Int): MediaFailure? = when 
 
 private fun MediaId.toDownloadId(): String =
     "${episodeKey.length}:${episodeKey}:${variantKey.length}:${variantKey}"
+
+private fun MediaItem.toDownloadRequest(): DownloadRequest = DownloadRequest.Builder(
+    downloadId(),
+    Uri.parse(originalEnclosureUrl),
+).setCustomCacheKey(mediaCacheKey()).build()
 
 /** Stores the shared identity and feed URL, never a resolved redirect target or cache path. */
 private data class DownloadRecord(
